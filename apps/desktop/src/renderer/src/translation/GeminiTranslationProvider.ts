@@ -37,9 +37,20 @@ interface ServerMessage {
   }
 }
 
+const SAMPLE_RATE = 16000
 const MIN_SAMPLES = 1600
-const MAX_SAMPLES = 16000 * 60
-const SEND_FRAME = 3200
+const MAX_SAMPLES = SAMPLE_RATE * 60
+const SEND_FRAME = 1600
+const SEND_INTERVAL_MS = 50
+const CAPTURE_TAIL_MS = 250
+const TRAILING_SILENCE_SAMPLES = Math.round(SAMPLE_RATE * 0.8)
+const PLAYBACK_IDLE_GRACE_MS = 1500
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
 
 function encodePcm(samples: Float32Array): string {
   const bytes = new Uint8Array(samples.length * 2)
@@ -85,15 +96,19 @@ export class GeminiTranslationProvider {
   private cancelSetup: (() => void) | null = null
   private testTimer: ReturnType<typeof setTimeout> | null = null
   private turnTimer: ReturnType<typeof setTimeout> | null = null
+  private releaseTimer: ReturnType<typeof setTimeout> | null = null
+  private idleFinishTimer: ReturnType<typeof setTimeout> | null = null
 
   private sessionTask: Promise<void> | null = null
   private options: StartOptions | null = null
 
-  private capturePhase: 'off' | 'opening' | 'live' = 'off'
+  private capturePhase: 'off' | 'opening' | 'live' | 'closing' = 'off'
   private captureEpoch = 0
   private chunks: Float32Array[] = []
   private sampleCount = 0
   private turnEnded = false
+  private sendingInput = false
+  private receivedOutput = false
 
   constructor(private readonly handlers: TranslationHandlers) {}
 
@@ -119,6 +134,9 @@ export class GeminiTranslationProvider {
     this.chunks = []
     this.sampleCount = 0
     this.turnEnded = false
+    this.sendingInput = false
+    this.receivedOutput = false
+    this.clearIdleFinishTimer()
     this.setState('capturing')
 
     void this.ensureSession(options).catch(() => {})
@@ -126,18 +144,34 @@ export class GeminiTranslationProvider {
   }
 
   stopCaptureAndTranslate(): void {
-    if (this.capturePhase === 'off') return
+    if (this.capturePhase === 'off' || this.capturePhase === 'closing') return
 
-    this.capturePhase = 'off'
-    this.captureEpoch += 1
-
-    const chunks = this.chunks
-    this.chunks = []
-    this.sampleCount = 0
-
+    const wasLive = this.capturePhase === 'live'
+    const epoch = this.captureEpoch
     const generation = this.generation
+
+    this.capturePhase = 'closing'
     this.setState('translating')
-    void this.finishCapture(chunks, generation)
+
+    const finalize = (): void => {
+      this.releaseTimer = null
+      if (this.captureEpoch !== epoch || this.generation !== generation) return
+
+      this.capturePhase = 'off'
+      this.captureEpoch += 1
+
+      const chunks = this.chunks
+      this.chunks = []
+      this.sampleCount = 0
+
+      void this.finishCapture(chunks, generation)
+    }
+
+    if (wasLive) {
+      this.releaseTimer = setTimeout(finalize, CAPTURE_TAIL_MS)
+    } else {
+      finalize()
+    }
   }
 
   stop(): void {
@@ -296,19 +330,29 @@ export class GeminiTranslationProvider {
     }
 
     this.turnEnded = false
+    this.sendingInput = true
+    this.receivedOutput = false
+    this.clearIdleFinishTimer()
+    this.armTurnTimer(generation)
+
+    const payloadChunks = [
+      ...chunks,
+      new Float32Array(TRAILING_SILENCE_SAMPLES),
+    ]
 
     try {
       let chunkIndex = 0
       let chunkOffset = 0
 
-      while (chunkIndex < chunks.length) {
+      while (chunkIndex < payloadChunks.length) {
         if (generation !== this.generation) return
+        if (socket.readyState !== WebSocket.OPEN) return
 
         const frame = new Float32Array(SEND_FRAME)
         let written = 0
 
-        while (written < SEND_FRAME && chunkIndex < chunks.length) {
-          const chunk = chunks[chunkIndex]
+        while (written < SEND_FRAME && chunkIndex < payloadChunks.length) {
+          const chunk = payloadChunks[chunkIndex]
 
           if (chunkOffset >= chunk.length) {
             chunkIndex += 1
@@ -337,16 +381,25 @@ export class GeminiTranslationProvider {
             },
           },
         }))
+
+        if (chunkIndex < payloadChunks.length) {
+          await sleep(SEND_INTERVAL_MS)
+        }
       }
 
       if (generation !== this.generation) return
+      if (socket.readyState !== WebSocket.OPEN) return
 
       socket.send(JSON.stringify({
         realtimeInput: { audioStreamEnd: true },
       }))
 
+      this.sendingInput = false
       this.armTurnTimer(generation)
+      this.finishTurnIfIdle()
+      this.scheduleIdleFinishIfNeeded(generation)
     } catch {
+      this.sendingInput = false
       if (generation === this.generation) {
         this.fail('No se pudo enviar el audio a Gemini.')
       }
@@ -528,6 +581,9 @@ export class GeminiTranslationProvider {
           const transcript = content?.outputTranscription?.text
 
           if (typeof transcript === 'string') {
+            this.receivedOutput = true
+            this.clearIdleFinishTimer()
+            this.armTurnTimer(generation)
             this.handlers.onText(transcript)
           }
 
@@ -538,13 +594,19 @@ export class GeminiTranslationProvider {
               typeof inline?.data === 'string' &&
               inline.mimeType?.startsWith('audio/pcm')
             ) {
-              this.playPcm(inline.data)
+              this.receivedOutput = true
+              this.clearIdleFinishTimer()
+              this.armTurnTimer(generation)
+              this.playPcm(inline.data, generation)
             }
           }
 
           if (content?.turnComplete) {
             this.turnEnded = true
+            this.clearIdleFinishTimer()
             this.finishTurnIfIdle()
+          } else if (typeof transcript === 'string') {
+            this.scheduleIdleFinishIfNeeded(generation)
           }
         }).catch((error: unknown) => {
           if (generation !== this.generation) return
@@ -628,12 +690,41 @@ export class GeminiTranslationProvider {
     }, 45000)
   }
 
+  private clearIdleFinishTimer(): void {
+    if (this.idleFinishTimer) {
+      clearTimeout(this.idleFinishTimer)
+      this.idleFinishTimer = null
+    }
+  }
+
+  private scheduleIdleFinishIfNeeded(generation: number): void {
+    if (generation !== this.generation) return
+    if (this.sendingInput || !this.receivedOutput) return
+    if (this.playback.size > 0) return
+    if (this.state !== 'translating' && this.state !== 'playing') return
+
+    this.clearIdleFinishTimer()
+
+    this.idleFinishTimer = setTimeout(() => {
+      this.idleFinishTimer = null
+      if (generation !== this.generation) return
+      if (this.sendingInput || this.playback.size > 0) return
+      if (this.state !== 'translating' && this.state !== 'playing') return
+
+      this.turnEnded = true
+      this.finishTurnIfIdle()
+    }, PLAYBACK_IDLE_GRACE_MS)
+  }
+
   private finishTurnIfIdle(): void {
     if (!this.turnEnded) return
+    if (this.sendingInput) return
     if (this.playback.size > 0) return
     if (this.state !== 'translating' && this.state !== 'playing') return
 
     this.turnEnded = false
+    this.receivedOutput = false
+    this.clearIdleFinishTimer()
 
     if (this.turnTimer) {
       clearTimeout(this.turnTimer)
@@ -643,7 +734,7 @@ export class GeminiTranslationProvider {
     this.setState('idle')
   }
 
-  private playPcm(base64: string): void {
+  private playPcm(base64: string, generation: number): void {
     if (this.state !== 'translating' && this.state !== 'playing') return
 
     const context = this.outputContext
@@ -683,6 +774,7 @@ export class GeminiTranslationProvider {
       this.playback.delete(source)
       source.disconnect()
       this.finishTurnIfIdle()
+      this.scheduleIdleFinishIfNeeded(generation)
     }
 
     const start = Math.max(
@@ -747,9 +839,18 @@ export class GeminiTranslationProvider {
     this.chunks = []
     this.sampleCount = 0
     this.turnEnded = false
+    this.sendingInput = false
+    this.receivedOutput = false
     this.sessionTask = null
     this.options = null
     this.outputId = ''
+
+    if (this.releaseTimer) {
+      clearTimeout(this.releaseTimer)
+      this.releaseTimer = null
+    }
+
+    this.clearIdleFinishTimer()
 
     if (this.testTimer) {
       clearTimeout(this.testTimer)

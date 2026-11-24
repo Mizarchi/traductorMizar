@@ -105,7 +105,9 @@ export function TranslationPanel({
       ? 'Reproduciendo traducción'
       : state === 'translating' || state === 'connecting'
         ? 'Traduciendo…'
-        : 'Mantén pulsado para hablar'
+        : state === 'capturing'
+          ? 'Escuchando… (suelta para traducir)'
+          : 'Mantén pulsado para hablar'
 
   function beginTalk(): void {
     if (holdingRef.current || talkDisabled) return
