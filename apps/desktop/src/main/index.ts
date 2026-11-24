@@ -55,6 +55,7 @@ function readHostInfo(): HostInfo {
 
 let microphoneArmed = false
 let outputArmed = false
+let displayCaptureArmed = false
 let pendingDisplaySourceId: string | null = null
 
 function parseTargetLanguage(args: unknown[]): TargetLanguage {
@@ -120,6 +121,7 @@ function registerIpc(): void {
     if (args.length !== 1 || typeof args[0] !== 'string' || args[0].trim().length === 0) {
       throw new Error('Debes indicar explicitamente una fuente de captura.')
     }
+    displayCaptureArmed = true
     pendingDisplaySourceId = args[0]
     return true
   })
@@ -143,6 +145,10 @@ function registerPermissions(): void {
       callback(outputArmed)
       return
     }
+    if (permission === 'display-capture') {
+      callback(displayCaptureArmed)
+      return
+    }
     if (permission === 'media') {
       const mediaTypes = 'mediaTypes' in details ? details.mediaTypes : undefined
       const audioOnly =
@@ -156,6 +162,7 @@ function registerPermissions(): void {
     const pageUrl = webContents?.getURL() ?? requestingOrigin
     if (!isTrustedUrl(pageUrl) && !isTrustedUrl(requestingOrigin)) return false
     if (permission === 'speaker-selection') return outputArmed
+    if (permission === 'display-capture') return displayCaptureArmed
     if (permission === 'media') {
       const mediaType = 'mediaType' in details ? details.mediaType : undefined
       const audio = mediaType === 'audio' || mediaType === undefined
