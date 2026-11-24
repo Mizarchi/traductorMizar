@@ -9,6 +9,31 @@ import {
 
 type CaptureMode = 'device' | 'system-loopback'
 
+const MAX_SUBTITLE_CHARS = 240
+const MAX_SUBTITLE_LINES = 3
+
+function appendSlidingSubtitle(previous: string, fragment: string): string {
+  const combined = (previous + fragment).replace(/\n{3,}/g, '\n\n')
+  const lines = combined.split('\n')
+  let trimmed = lines.length > MAX_SUBTITLE_LINES
+    ? lines.slice(-MAX_SUBTITLE_LINES).join('\n')
+    : combined
+
+  if (trimmed.length > MAX_SUBTITLE_CHARS) {
+    const start = trimmed.length - MAX_SUBTITLE_CHARS
+    const breakAt = trimmed.indexOf(' ', start)
+    trimmed = breakAt > start ? trimmed.slice(breakAt + 1) : trimmed.slice(start)
+  }
+
+  return trimmed.replace(/^\n+/, '')
+}
+
+export interface MeetingOverlayUpdate {
+  subtitles: string
+  meetingStatus: string
+  meetingActive: boolean
+}
+
 interface MeetingTranslationPanelProps {
   inputs: ListedDevice[]
   outgoingInputId: string
@@ -16,6 +41,7 @@ interface MeetingTranslationPanelProps {
   host: HostInfo | null
   stopSignal: number
   onActiveChange: (active: boolean) => void
+  onOverlayUpdate: (update: MeetingOverlayUpdate) => void
 }
 
 const stateLabels: Record<MeetingTranslationState, string> = {
@@ -33,9 +59,12 @@ export function MeetingTranslationPanel({
   host,
   stopSignal,
   onActiveChange,
+  onOverlayUpdate,
 }: MeetingTranslationPanelProps): JSX.Element {
   const providerRef = useRef<MeetingTranslationProvider | null>(null)
   const activeCallbackRef = useRef(onActiveChange)
+  const overlayCallbackRef = useRef(onOverlayUpdate)
+  const subtitlesRef = useRef<HTMLDivElement | null>(null)
   const lastStopSignal = useRef(stopSignal)
 
   const [mode, setMode] = useState<CaptureMode>('device')
@@ -50,6 +79,7 @@ export function MeetingTranslationPanel({
   const [error, setError] = useState('')
 
   activeCallbackRef.current = onActiveChange
+  overlayCallbackRef.current = onOverlayUpdate
 
   useEffect(() => {
     let mounted = true
@@ -64,7 +94,7 @@ export function MeetingTranslationPanel({
       },
       onText: (fragment) => {
         if (!mounted) return
-        setSubtitles((previous) => (previous + fragment).slice(-12000))
+        setSubtitles((previous) => appendSlidingSubtitle(previous, fragment))
       },
       onLevel: (nextLevel) => {
         if (mounted) setLevel(nextLevel)
@@ -82,6 +112,21 @@ export function MeetingTranslationPanel({
       providerRef.current = null
     }
   }, [])
+
+  useEffect(() => {
+    const node = subtitlesRef.current
+    if (node) {
+      node.scrollTop = node.scrollHeight
+    }
+  }, [subtitles])
+
+  useEffect(() => {
+    overlayCallbackRef.current({
+      subtitles,
+      meetingStatus: stateLabels[state],
+      meetingActive: state === 'connecting' || state === 'listening',
+    })
+  }, [subtitles, state])
 
   useEffect(() => {
     if (lastStopSignal.current === stopSignal) return
@@ -297,6 +342,14 @@ export function MeetingTranslationPanel({
         >
           Limpiar subtítulos
         </button>
+        <button
+          type="button"
+          className="secondary"
+          disabled={!window.audioDiagnostic}
+          onClick={() => void window.audioDiagnostic.openOverlayWindow()}
+        >
+          Abrir ventana flotante
+        </button>
       </div>
 
       <p role="status">Estado (EN → ES): {stateLabels[state]}</p>
@@ -324,7 +377,9 @@ export function MeetingTranslationPanel({
       ) : null}
 
       <h3>Subtítulos en español</h3>
-      <p className="subtitles">{subtitles || 'Los subtítulos en español aparecerán aquí.'}</p>
+      <div ref={subtitlesRef} className="subtitles" aria-live="polite">
+        {subtitles || 'Los subtítulos en español aparecerán aquí.'}
+      </div>
     </section>
   )
 }

@@ -4,6 +4,14 @@ import {
   type TranslationState,
 } from './GeminiTranslationProvider'
 
+export interface OutgoingOverlayUpdate {
+  outgoingStatus: string
+  outgoingText: string
+  talkLabel: string
+  talkDisabled: boolean
+  holding: boolean
+}
+
 interface TranslationPanelProps {
   inputId: string
   outputId: string
@@ -11,6 +19,7 @@ interface TranslationPanelProps {
   stopSignal: number
   onPrepare: () => void
   onActiveChange: (active: boolean) => void
+  onOverlayUpdate: (update: OutgoingOverlayUpdate) => void
 }
 
 const stateLabels: Record<TranslationState, string> = {
@@ -30,9 +39,11 @@ export function TranslationPanel({
   stopSignal,
   onPrepare,
   onActiveChange,
+  onOverlayUpdate,
 }: TranslationPanelProps): JSX.Element {
   const providerRef = useRef<GeminiTranslationProvider | null>(null)
   const activeCallbackRef = useRef(onActiveChange)
+  const overlayCallbackRef = useRef(onOverlayUpdate)
   const lastStopSignal = useRef(stopSignal)
 
   const [state, setState] = useState<TranslationState>('idle')
@@ -42,6 +53,7 @@ export function TranslationPanel({
   const holdingRef = useRef(false)
 
   activeCallbackRef.current = onActiveChange
+  overlayCallbackRef.current = onOverlayUpdate
 
   useEffect(() => {
     let mounted = true
@@ -138,6 +150,29 @@ export function TranslationPanel({
     setHolding(false)
     providerRef.current?.stop()
   }
+
+  const commandActionsRef = useRef({ beginTalk, endTalk, stop })
+  commandActionsRef.current = { beginTalk, endTalk, stop }
+
+  useEffect(() => {
+    const bridge = window.audioDiagnostic
+    if (!bridge) return
+    return bridge.onOverlayCommand((command) => {
+      if (command === 'talk-start') commandActionsRef.current.beginTalk()
+      else if (command === 'talk-end') commandActionsRef.current.endTalk()
+      else if (command === 'talk-stop') commandActionsRef.current.stop()
+    })
+  }, [])
+
+  useEffect(() => {
+    overlayCallbackRef.current({
+      outgoingStatus: stateLabels[state],
+      outgoingText: text,
+      talkLabel,
+      talkDisabled,
+      holding,
+    })
+  }, [state, text, talkLabel, talkDisabled, holding])
 
   return (
     <section>

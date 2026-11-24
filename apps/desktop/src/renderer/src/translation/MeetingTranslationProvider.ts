@@ -21,6 +21,7 @@ interface ServerMessage {
   error?: { code?: number }
   goAway?: object
   serverContent?: {
+    turnComplete?: boolean
     outputTranscription?: { text?: string }
   }
 }
@@ -351,6 +352,10 @@ export class MeetingTranslationProvider {
 
           if (typeof transcript === 'string' && transcript.length > 0) {
             this.handlers.onText(transcript)
+          }
+
+          if (message.serverContent?.turnComplete) {
+            this.handlers.onText('\n')
           }
           // El audio PCM de salida (modelTurn.parts[].inlineData) se ignora a proposito:
           // esta primera version solo muestra subtitulos en espanol.

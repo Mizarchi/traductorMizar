@@ -10,8 +10,14 @@ import {
   ARM_OUTPUT_CHANNEL,
   HOST_INFO_CHANNEL,
   LIST_DISPLAY_SOURCES_CHANNEL,
+  OVERLAY_CLOSE_CHANNEL,
+  OVERLAY_COMMAND_CHANNEL,
+  OVERLAY_OPEN_CHANNEL,
+  OVERLAY_STATE_CHANNEL,
   type DisplayCaptureSource,
   type HostInfo,
+  type OverlayCommand,
+  type OverlaySnapshot,
   type TargetLanguage,
 } from '../shared/ipc'
 
@@ -24,7 +30,7 @@ function rendererDevUrl(): string | null {
 
 function isTrustedUrl(url: string): boolean {
   const devUrl = rendererDevUrl()
-  if (devUrl && (url === devUrl || url.startsWith(`${devUrl}/`))) return true
+  if (devUrl && (url === devUrl || url.startsWith(`${devUrl}/`) || url.startsWith(`${devUrl}#`))) return true
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -57,6 +63,75 @@ let microphoneArmed = false
 let outputArmed = false
 let displayCaptureArmed = false
 let pendingDisplaySourceId: string | null = null
+let mainWindow: BrowserWindow | null = null
+let overlayWindow: BrowserWindow | null = null
+let latestOverlayState: OverlaySnapshot | null = null
+
+function openOrFocusOverlay(): void {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.show()
+    overlayWindow.focus()
+    return
+  }
+
+  const win = new BrowserWindow({
+    width: 540,
+    height: 250,
+    minWidth: 360,
+    minHeight: 180,
+    show: false,
+    title: 'Subtítulos en vivo',
+    alwaysOnTop: true,
+    autoHideMenuBar: true,
+    backgroundColor: '#171614',
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      backgroundThrottling: false,
+    },
+  })
+
+  win.setAlwaysOnTop(true, 'floating')
+  win.setContentProtection(true)
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!isTrustedUrl(url)) event.preventDefault()
+  })
+
+  win.once('ready-to-show', () => win.show())
+  win.webContents.once('did-finish-load', () => {
+    if (latestOverlayState && !win.isDestroyed()) {
+      win.webContents.send(OVERLAY_STATE_CHANNEL, latestOverlayState)
+    }
+  })
+  win.on('closed', () => {
+    if (overlayWindow === win) {
+      overlayWindow = null
+    }
+  })
+
+  overlayWindow = win
+
+  const devUrl = rendererDevUrl()
+  if (devUrl) {
+    void win.loadURL(`${devUrl}#overlay`)
+  } else {
+    void win.loadFile(path.join(__dirname, '../renderer/index.html'), {
+      hash: 'overlay',
+    })
+  }
+}
+
+function closeOverlay(): void {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.close()
+  }
+  overlayWindow = null
+}
 
 function parseTargetLanguage(args: unknown[]): TargetLanguage {
   if (args.length === 0) return 'en'
@@ -124,6 +199,34 @@ function registerIpc(): void {
     displayCaptureArmed = true
     pendingDisplaySourceId = args[0]
     return true
+  })
+  ipcMain.handle(OVERLAY_OPEN_CHANNEL, (event, ...args: unknown[]) => {
+    rejectArguments(args)
+    assertTrustedSender(event)
+    openOrFocusOverlay()
+    return true
+  })
+  ipcMain.handle(OVERLAY_CLOSE_CHANNEL, (event, ...args: unknown[]) => {
+    rejectArguments(args)
+    assertTrustedSender(event)
+    closeOverlay()
+    return true
+  })
+  ipcMain.on(OVERLAY_STATE_CHANNEL, (event, snapshot: OverlaySnapshot) => {
+    const url = event.senderFrame?.url
+    if (!url || !isTrustedUrl(url)) return
+    latestOverlayState = snapshot
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.send(OVERLAY_STATE_CHANNEL, snapshot)
+    }
+  })
+  ipcMain.on(OVERLAY_COMMAND_CHANNEL, (event, command: unknown) => {
+    const url = event.senderFrame?.url
+    if (!url || !isTrustedUrl(url)) return
+    if (command !== 'talk-start' && command !== 'talk-end' && command !== 'talk-stop') return
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(OVERLAY_COMMAND_CHANNEL, command satisfies OverlayCommand)
+    }
   })
 }
 
@@ -233,6 +336,14 @@ function createWindow(): BrowserWindow {
     void win.loadFile(path.join(__dirname, '../renderer/index.html'))
   }
 
+  win.on('closed', () => {
+    if (mainWindow === win) {
+      mainWindow = null
+    }
+    closeOverlay()
+  })
+
+  mainWindow = win
   return win
 }
 

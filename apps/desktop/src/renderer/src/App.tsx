@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type JSX } from 'react'
+import { useCallback, useEffect, useRef, useState, type JSX } from 'react'
 import { deviceCaption, listEndpoints, preferredPhysicalInput, type ListedDevice } from './audio/devices'
-import { MeetingTranslationPanel } from './translation/MeetingTranslationPanel'
-import { TranslationPanel } from './translation/TranslationPanel'
+import { MeetingTranslationPanel, type MeetingOverlayUpdate } from './translation/MeetingTranslationPanel'
+import { TranslationPanel, type OutgoingOverlayUpdate } from './translation/TranslationPanel'
 import {
   describeMediaError,
   describeMissingDevice,
@@ -11,7 +11,7 @@ import {
 } from './audio/messages'
 import { chooseOutputWithSystemPicker, probeOutputApis, type OutputApiProbe } from './audio/probe'
 import { LocalAudioSession } from './audio/session'
-import type { HostInfo } from '../../shared/ipc'
+import type { HostInfo, OverlaySnapshot } from '../../shared/ipc'
 
 type Tone = 'info' | 'ok' | 'error'
 
@@ -50,6 +50,27 @@ export function App(): JSX.Element {
   const [incomingActive, setIncomingActive] = useState(false)
   const [translationStopSignal, setTranslationStopSignal] = useState(0)
   const anyActive = busy || outgoingActive || incomingActive
+
+  const overlaySnapshotRef = useRef<OverlaySnapshot>({
+    subtitles: '',
+    meetingStatus: 'Listo',
+    meetingActive: false,
+    outgoingStatus: 'Listo',
+    outgoingText: '',
+    talkLabel: 'Mantén pulsado para hablar',
+    talkDisabled: true,
+    holding: false,
+  })
+
+  const handleMeetingOverlayUpdate = useCallback((update: MeetingOverlayUpdate): void => {
+    overlaySnapshotRef.current = { ...overlaySnapshotRef.current, ...update }
+    window.audioDiagnostic?.publishOverlayState(overlaySnapshotRef.current)
+  }, [])
+
+  const handleOutgoingOverlayUpdate = useCallback((update: OutgoingOverlayUpdate): void => {
+    overlaySnapshotRef.current = { ...overlaySnapshotRef.current, ...update }
+    window.audioDiagnostic?.publishOverlayState(overlaySnapshotRef.current)
+  }, [])
   const inputIdRef = useRef('')
   const outputIdRef = useRef('')
   const inputsRef = useRef<ListedDevice[]>([])
@@ -390,6 +411,7 @@ export function App(): JSX.Element {
         stopSignal={translationStopSignal}
         onPrepare={prepareTranslation}
         onActiveChange={setOutgoingActive}
+        onOverlayUpdate={handleOutgoingOverlayUpdate}
       />
 
       <MeetingTranslationPanel
@@ -399,6 +421,7 @@ export function App(): JSX.Element {
         host={host}
         stopSignal={translationStopSignal}
         onActiveChange={setIncomingActive}
+        onOverlayUpdate={handleMeetingOverlayUpdate}
       />
 
       <section>
