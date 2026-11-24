@@ -125,6 +125,7 @@ export function App(): JSX.Element {
     const currentInput = inputIdRef.current
     if (currentInput && !nextInputs.some((device) => device.deviceId === currentInput)) {
       const previous = previousInputs.find((device) => device.deviceId === currentInput)
+      setTranslationStopSignal((value) => value + 1)
       session.stopMonitoring()
       setMonitoring(false)
       setLevel(0)
@@ -143,6 +144,7 @@ export function App(): JSX.Element {
     const currentOutput = outputIdRef.current
     if (currentOutput && !nextOutputs.some((device) => device.deviceId === currentOutput)) {
       const previous = previousOutputs.find((device) => device.deviceId === currentOutput)
+      setTranslationStopSignal((value) => value + 1)
       session.stopTone()
       setOutputId('')
       outputIdRef.current = ''

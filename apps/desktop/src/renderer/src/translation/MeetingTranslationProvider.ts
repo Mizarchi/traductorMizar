@@ -26,8 +26,6 @@ interface ServerMessage {
   }
 }
 
-const SESSION_LIMIT_MS = 120000
-
 function encodePcm(samples: Float32Array): string {
   const bytes = new Uint8Array(samples.length * 2)
   const view = new DataView(bytes.buffer)
@@ -76,7 +74,6 @@ export class MeetingTranslationProvider {
   private silentGain: GainNode | null = null
 
   private cancelSetup: (() => void) | null = null
-  private sessionTimer: ReturnType<typeof setTimeout> | null = null
   private trackCleanups: Array<() => void> = []
 
   constructor(private readonly handlers: MeetingTranslationHandlers) {}
@@ -185,12 +182,6 @@ export class MeetingTranslationProvider {
       if (generation !== this.generation) return
 
       this.setState('listening')
-
-      this.sessionTimer = setTimeout(() => {
-        if (generation === this.generation) {
-          this.stop()
-        }
-      }, SESSION_LIMIT_MS)
     } catch (error) {
       if (generation !== this.generation) return
 
@@ -420,11 +411,6 @@ export class MeetingTranslationProvider {
   }
 
   private release(): void {
-    if (this.sessionTimer) {
-      clearTimeout(this.sessionTimer)
-      this.sessionTimer = null
-    }
-
     const cancelSetup = this.cancelSetup
     this.cancelSetup = null
     cancelSetup?.()

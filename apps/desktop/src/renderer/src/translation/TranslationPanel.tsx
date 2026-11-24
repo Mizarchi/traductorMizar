@@ -187,7 +187,6 @@ export function TranslationPanel({
       <p>
         Usa auriculares y frases de prueba sin informacion sensible.
         Mientras se traduce y se reproduce, el microfono sigue apagado.
-        La sesion de esta beta se cierra sola a los dos minutos.
       </p>
 
       <div className="row">

@@ -5,25 +5,25 @@ import path from 'node:path'
 
 import type { GeminiSessionCredential, TargetLanguage } from '../shared/ipc'
 
-const pending = new Map<TargetLanguage, Promise<GeminiSessionCredential>>()
+const MAX_IN_FLIGHT = 4
+let inFlightCount = 0
 
 export function createGeminiSession(
   projectRoot: string,
   targetLanguage: TargetLanguage = 'en',
 ): Promise<GeminiSessionCredential> {
-  if (pending.has(targetLanguage)) {
+  if (inFlightCount >= MAX_IN_FLIGHT) {
     return Promise.reject(
-      new Error('Ya se esta preparando una sesion de Gemini para esta direccion.'),
+      new Error('Demasiadas solicitudes simultaneas de sesion de Gemini.'),
     )
   }
 
+  inFlightCount += 1
   const task = requestCredential(projectRoot, targetLanguage)
-  pending.set(targetLanguage, task)
 
-  void task.then(
-    () => { if (pending.get(targetLanguage) === task) pending.delete(targetLanguage) },
-    () => { if (pending.get(targetLanguage) === task) pending.delete(targetLanguage) },
-  )
+  void task.finally(() => {
+    inFlightCount = Math.max(0, inFlightCount - 1)
+  })
 
   return task
 }

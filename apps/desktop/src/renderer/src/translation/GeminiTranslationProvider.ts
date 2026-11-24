@@ -94,10 +94,10 @@ export class GeminiTranslationProvider {
   private nextPlaybackTime = 0
 
   private cancelSetup: (() => void) | null = null
-  private testTimer: ReturnType<typeof setTimeout> | null = null
   private turnTimer: ReturnType<typeof setTimeout> | null = null
   private releaseTimer: ReturnType<typeof setTimeout> | null = null
   private idleFinishTimer: ReturnType<typeof setTimeout> | null = null
+  private trackCleanups: Array<() => void> = []
 
   private sessionTask: Promise<void> | null = null
   private options: StartOptions | null = null
@@ -210,11 +210,13 @@ export class GeminiTranslationProvider {
       this.stream = stream
 
       for (const track of stream.getTracks()) {
-        track.addEventListener('ended', () => {
+        const onEnded = (): void => {
           if (this.captureIsCurrent(epoch, generation)) {
             this.fail('El microfono se desconecto.')
           }
-        })
+        }
+        track.addEventListener('ended', onEnded)
+        this.trackCleanups.push(() => track.removeEventListener('ended', onEnded))
       }
 
       const input = new AudioContext({ sampleRate: 16000 })
@@ -453,6 +455,9 @@ export class GeminiTranslationProvider {
 
     await window.audioDiagnostic.armOutputRequest()
     await player.setSinkId(outputId)
+    if (player.sinkId !== outputId) {
+      throw new Error('No se pudo confirmar la salida de audio seleccionada.')
+    }
     this.outputId = outputId
   }
 
@@ -479,6 +484,9 @@ export class GeminiTranslationProvider {
     player.srcObject = destination.stream
 
     await player.setSinkId(options.outputId)
+    if (player.sinkId !== options.outputId) {
+      throw new Error('No se pudo enrutar la reproduccion a la salida elegida.')
+    }
     this.outputId = options.outputId
 
     if (generation !== this.generation) return
@@ -653,12 +661,6 @@ export class GeminiTranslationProvider {
     })
 
     if (generation !== this.generation) return
-
-    this.testTimer = setTimeout(() => {
-      if (generation === this.generation) {
-        this.stop()
-      }
-    }, 120000)
   }
 
   private fail(message: string): void {
@@ -818,6 +820,11 @@ export class GeminiTranslationProvider {
     this.silentGain?.disconnect()
     this.silentGain = null
 
+    for (const cleanup of this.trackCleanups) {
+      cleanup()
+    }
+    this.trackCleanups = []
+
     this.stream?.getTracks().forEach((track) => track.stop())
     this.stream = null
   }
@@ -851,11 +858,6 @@ export class GeminiTranslationProvider {
     }
 
     this.clearIdleFinishTimer()
-
-    if (this.testTimer) {
-      clearTimeout(this.testTimer)
-      this.testTimer = null
-    }
 
     if (this.turnTimer) {
       clearTimeout(this.turnTimer)

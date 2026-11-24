@@ -134,12 +134,16 @@ export function MeetingTranslationPanel({
     providerRef.current?.stop()
   }, [stopSignal])
 
-  // Si el dispositivo seleccionado desaparece, limpiamos la seleccion.
+  // Si el dispositivo seleccionado desaparece, detenemos la sesion entrante y limpiamos la seleccion.
   useEffect(() => {
     if (meetingInputId && !inputs.some((device) => device.deviceId === meetingInputId)) {
+      if (mode === 'device') {
+        providerRef.current?.stop()
+        setError('La entrada de audio de la reunión se desconectó y la captura se detuvo.')
+      }
       setMeetingInputId('')
     }
-  }, [inputs, meetingInputId])
+  }, [inputs, meetingInputId, mode])
 
   const active = state === 'connecting' || state === 'listening' || state === 'stopping'
   const selectedMeetingInput = inputs.find((device) => device.deviceId === meetingInputId) ?? null
@@ -152,6 +156,15 @@ export function MeetingTranslationPanel({
     outgoingInputId.length > 0 &&
     meetingInputId === outgoingInputId
 
+  const sameVirtualCableLoop =
+    mode === 'device' &&
+    selectedMeetingInput !== null &&
+    outgoingOutput !== null &&
+    /cable output\b/i.test(selectedMeetingInput.label) &&
+    /cable input\b/i.test(outgoingOutput.label) &&
+    !/cable-[a-z]/i.test(selectedMeetingInput.label) &&
+    !/cable-[a-z]/i.test(outgoingOutput.label)
+
   const loopbackOutputRisk =
     mode === 'system-loopback' &&
     (!outgoingOutput || !outgoingOutput.virtualHint)
@@ -160,7 +173,7 @@ export function MeetingTranslationPanel({
     !active &&
     !loadingSources &&
     (mode === 'device'
-      ? meetingInputId.length > 0 && !sameAsPhysicalMic
+      ? meetingInputId.length > 0 && !sameAsPhysicalMic && !sameVirtualCableLoop
       : isWindows && displaySourceId.length > 0 && !loopbackOutputRisk)
 
   async function refreshDisplaySources(): Promise<void> {
@@ -254,6 +267,14 @@ export function MeetingTranslationPanel({
             <p className="status error" role="alert">
               Bloqueado: esta entrada es la misma que el micrófono físico de español → inglés.
               No mezcles tu micrófono físico con el audio de la reunión.
+            </p>
+          ) : null}
+
+          {sameVirtualCableLoop ? (
+            <p className="status error" role="alert">
+              Bloqueo anti-retorno: «{selectedMeetingInput?.label}» es el otro extremo del mismo
+              cable virtual que usa la salida de español → inglés («{outgoingOutput?.label}»).
+              Usa «Audio del sistema de Windows (loopback)» o un segundo cable virtual distinto.
             </p>
           ) : null}
 
