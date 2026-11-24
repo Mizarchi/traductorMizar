@@ -41,10 +41,10 @@ const SAMPLE_RATE = 16000
 const MIN_SAMPLES = 1600
 const MAX_SAMPLES = SAMPLE_RATE * 60
 const SEND_FRAME = 1600
-const SEND_INTERVAL_MS = 50
-const CAPTURE_TAIL_MS = 250
-const TRAILING_SILENCE_SAMPLES = Math.round(SAMPLE_RATE * 0.8)
-const PLAYBACK_IDLE_GRACE_MS = 1500
+const SEND_INTERVAL_MS = 75
+const CAPTURE_TAIL_MS = 400
+const TRAILING_SILENCE_SAMPLES = SAMPLE_RATE * 2
+const PLAYBACK_IDLE_GRACE_MS = 2500
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
