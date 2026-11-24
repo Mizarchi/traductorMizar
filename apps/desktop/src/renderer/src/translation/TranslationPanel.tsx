@@ -239,7 +239,7 @@ export function TranslationPanel({
       ) : null}
 
       <h3>Texto traducido</h3>
-      <p>{text || 'La traduccion aparecera aqui.'}</p>
+      <div className="subtitles">{text || 'La traduccion aparecera aqui.'}</div>
     </section>
   )
 }

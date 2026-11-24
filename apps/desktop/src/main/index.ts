@@ -302,12 +302,12 @@ function registerPermissions(): void {
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
-    width: 920,
-    height: 860,
-    minWidth: 720,
-    minHeight: 640,
+    width: 1180,
+    height: 720,
+    minWidth: 820,
+    minHeight: 560,
     show: false,
-    title: 'Diagnóstico de audio local',
+    title: 'Traductor Mizar',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),

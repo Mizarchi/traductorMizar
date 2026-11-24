@@ -49,6 +49,7 @@ export function App(): JSX.Element {
   const [outgoingActive, setOutgoingActive] = useState(false)
   const [incomingActive, setIncomingActive] = useState(false)
   const [translationStopSignal, setTranslationStopSignal] = useState(0)
+  const [activeModal, setActiveModal] = useState<'none' | 'audio' | 'system'>('none')
   const anyActive = busy || outgoingActive || incomingActive
 
   const overlaySnapshotRef = useRef<OverlaySnapshot>({
@@ -95,11 +96,23 @@ export function App(): JSX.Element {
     })
 
     const onPageHide = (): void => session.stopAll()
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.ctrlKey && event.key.toLowerCase() === 'd') {
+        event.preventDefault()
+        setActiveModal((current) => (current === 'system' ? 'none' : 'system'))
+        return
+      }
+      if (event.key === 'Escape') {
+        setActiveModal('none')
+      }
+    }
     window.addEventListener('pagehide', onPageHide)
     window.addEventListener('beforeunload', onPageHide)
+    window.addEventListener('keydown', onKeyDown)
     return () => {
       window.removeEventListener('pagehide', onPageHide)
       window.removeEventListener('beforeunload', onPageHide)
+      window.removeEventListener('keydown', onKeyDown)
       session.stopAll()
     }
   }, [session])
@@ -403,198 +416,273 @@ export function App(): JSX.Element {
   }
 
   return (
-    <main>
-      <h1>Diagnóstico de audio local</h1>
-
-      <TranslationPanel
-        inputId={inputId}
-        outputId={outputId}
-        diagnosticBusy={busy}
-        stopSignal={translationStopSignal}
-        onPrepare={prepareTranslation}
-        onActiveChange={setOutgoingActive}
-        onOverlayUpdate={handleOutgoingOverlayUpdate}
-      />
-
-      <MeetingTranslationPanel
-        inputs={inputs}
-        outgoingInputId={inputId}
-        outgoingOutput={selectedOutput}
-        host={host}
-        stopSignal={translationStopSignal}
-        onActiveChange={setIncomingActive}
-        onOverlayUpdate={handleMeetingOverlayUpdate}
-      />
-
-      <section>
-        <h2>Conexion con Gemini</h2>
-        <p>
-          Comprueba el backend y las credenciales.
-          Esta prueba no abre el microfono ni envia audio.
-        </p>
-        <button
-          type="button"
-          disabled={anyActive || !window.audioDiagnostic}
-          onClick={() => void checkGeminiConnection()}
-        >
-          Comprobar conexion con Gemini
-        </button>
-      </section>
-      <p className="lead">
-        Enumera dispositivos, pide el micrófono con un botón y reproduce un tono en la salida que esta versión
-        pueda seleccionar. No traduce ni se une a una reunión.
-      </p>
-
-      <section>
-        <h2>Sistema</h2>
-        {host ? (
-          <>
-            <p>
-              Electron {host.electron} · Chromium {host.chrome}
-            </p>
-            <p>{describePlatformLimit(host)}</p>
-          </>
-        ) : (
-          <p className="status error">{hostError ?? 'Leyendo la versión instalada…'}</p>
-        )}
-      </section>
-
-      <section>
-        <h2>Selección de salida en esta versión</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>API</th>
-              <th>Estado</th>
-            </tr>
-          </thead>
-          <tbody>
-            <ApiRow name="enumerateDevices" available={probe.enumerateDevices} />
-            <ApiRow name="HTMLMediaElement.setSinkId" available={probe.setSinkIdOnMediaElement} />
-            <ApiRow name="AudioContext.setSinkId" available={probe.setSinkIdOnAudioContext} />
-            <ApiRow name="mediaDevices.selectAudioOutput" available={probe.selectAudioOutput} />
-          </tbody>
-        </table>
-        <p>{describeOutputSupport(probe, host)}</p>
-      </section>
-
-      <section>
-        <h2>Permiso del micrófono</h2>
-        <p className="hint">
-          Hasta que pulses el botón no se abre ninguna pista. Si Windows o el runtime lo niegan, el mensaje muestra
-          el error real.
-        </p>
-        <div className="row">
-          <button type="button" onClick={() => void requestMicrophone()} disabled={anyActive || !window.audioDiagnostic}>
-            Solicitar permiso del micrófono
-          </button>
-          <button type="button" className="secondary" onClick={() => void refreshDevices(false)} disabled={busy}>
-            Volver a enumerar
-          </button>
-        </div>
-      </section>
-
-      <section>
-        <h2>Micrófono físico</h2>
-        <label className="field">
-          Entrada
-          <select
-            value={inputId}
-            disabled={busy || outgoingActive}
-            onChange={(event) => {
-              const next = event.target.value
-              monitorOperationRef.current += 1
-              session.stopMonitoring()
-              setMonitoring(false)
-              setLevel(0)
-              setInputId(next)
-            }}
-          >
-            <option value="">Elige un micrófono</option>
-            {inputs.map((device) => (
-              <option key={device.deviceId} value={device.deviceId}>
-                {deviceCaption(device)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <p className="hint">
-          {inputs.length === 0
-            ? 'No hay entradas enumeradas. Conecta un micrófono o revisa el permiso.'
-            : `${inputs.length} entrada(s), sin contar los alias default y communications.`}
-          {unlabeled ? ' Hay dispositivos sin nombre: el sistema no entregó la etiqueta.' : ''}
-        </p>
-        {selectedInput?.virtualHint ? (
-          <p className="status error">
-            La entrada elegida parece un cable o un dispositivo virtual. Para este diagnóstico elige el micrófono
-            físico.
+    <main className="app-main">
+      <header className="app-header">
+        <div>
+          <h1>Traductor Mizar</h1>
+          <p className="hint app-subtitle">
+            {selectedInput ? `Micrófono: ${deviceCaption(selectedInput)}` : 'Micrófono sin elegir'}
+            {' · '}
+            {selectedOutput ? `Salida: ${deviceCaption(selectedOutput)}` : 'Salida sin elegir'}
           </p>
-        ) : null}
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={monitoring}
-            disabled={busy || outgoingActive || !selectedInput}
-            onChange={(event) => void toggleMonitor(event.target.checked)}
-          />
-          Medidor de nivel
-        </label>
-        <div
-          className="meter"
-          role="meter"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={monitoring ? level : 0}
-          aria-label="Nivel del micrófono"
-        >
-          <span style={{ width: monitoring ? `${level}%` : '0%' }} />
         </div>
-        <p className="hint">{monitoring ? `Nivel relativo: ${level}` : 'Medidor apagado.'}</p>
-      </section>
-
-      <section>
-        <h2>Salida del tono</h2>
-        <label className="field">
-          Salida
-          <select value={outputId} disabled={busy || outgoingActive} onChange={(event) => setOutputId(event.target.value)}>
-            <option value="">Elige una salida</option>
-            {outputs.map((device) => (
-              <option key={device.deviceId} value={device.deviceId}>
-                {deviceCaption(device)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <p className="hint">
-          {outputs.length === 0
-            ? 'No hay salidas enumeradas. Revisa el dispositivo de reproducción del sistema.'
-            : `${outputs.length} salida(s), sin contar los alias default y communications.`}
-        </p>
         <div className="row">
-          <button type="button" onClick={() => void playSelected()} disabled={busy || outgoingActive || !probe.setSinkIdOnMediaElement}>
-            Reproducir tono en la salida elegida
-          </button>
           <button
             type="button"
             className="secondary"
-            onClick={() => void pickOutput()}
-            disabled={busy || outgoingActive || !probe.selectAudioOutput}
+            onClick={() => setActiveModal('audio')}
           >
-            Elegir con el selector del sistema
+            ⚙ Ajustes de micrófono y salida
           </button>
-          <button type="button" className="secondary" onClick={() => void playDefault()} disabled={busy || outgoingActive}>
-            Reproducir tono en la salida predeterminada
+          <button type="button" onClick={releaseAll}>
+            Detener y liberar
           </button>
         </div>
-      </section>
+      </header>
 
-      <section>
-        <h2>Cierre</h2>
-        <button type="button" onClick={releaseAll}>
-          Detener y liberar
-        </button>
-        <p className={`status ${status.tone}`}>{status.text}</p>
-      </section>
+      <div className="translation-grid">
+        <div className="translation-col">
+          <TranslationPanel
+            inputId={inputId}
+            outputId={outputId}
+            diagnosticBusy={busy}
+            stopSignal={translationStopSignal}
+            onPrepare={prepareTranslation}
+            onActiveChange={setOutgoingActive}
+            onOverlayUpdate={handleOutgoingOverlayUpdate}
+          />
+        </div>
+
+        <div className="translation-col">
+          <MeetingTranslationPanel
+            inputs={inputs}
+            outgoingInputId={inputId}
+            outgoingOutput={selectedOutput}
+            host={host}
+            stopSignal={translationStopSignal}
+            onActiveChange={setIncomingActive}
+            onOverlayUpdate={handleMeetingOverlayUpdate}
+          />
+        </div>
+      </div>
+
+      <p className={`status ${status.tone}`}>{status.text}</p>
+
+      {activeModal === 'audio' ? (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Ajustes de micrófono y salida"
+          onClick={() => setActiveModal('none')}
+        >
+          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Ajustes de micrófono y salida</h2>
+              <button
+                type="button"
+                className="secondary modal-close"
+                onClick={() => setActiveModal('none')}
+              >
+                Cerrar
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <section>
+                <h3>Permiso del micrófono</h3>
+                <p className="hint">
+                  Hasta que pulses el botón no se abre ninguna pista. Si Windows o el runtime lo niegan, el mensaje muestra
+                  el error real.
+                </p>
+                <div className="row">
+                  <button type="button" onClick={() => void requestMicrophone()} disabled={anyActive || !window.audioDiagnostic}>
+                    Solicitar permiso del micrófono
+                  </button>
+                  <button type="button" className="secondary" onClick={() => void refreshDevices(false)} disabled={busy}>
+                    Volver a enumerar
+                  </button>
+                </div>
+              </section>
+
+              <section>
+                <h3>Micrófono físico</h3>
+                <label className="field">
+                  Entrada
+                  <select
+                    value={inputId}
+                    disabled={busy || outgoingActive}
+                    onChange={(event) => {
+                      const next = event.target.value
+                      monitorOperationRef.current += 1
+                      session.stopMonitoring()
+                      setMonitoring(false)
+                      setLevel(0)
+                      setInputId(next)
+                    }}
+                  >
+                    <option value="">Elige un micrófono</option>
+                    {inputs.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {deviceCaption(device)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="hint">
+                  {inputs.length === 0
+                    ? 'No hay entradas enumeradas. Conecta un micrófono o revisa el permiso.'
+                    : `${inputs.length} entrada(s), sin contar los alias default y communications.`}
+                  {unlabeled ? ' Hay dispositivos sin nombre: el sistema no entregó la etiqueta.' : ''}
+                </p>
+                {selectedInput?.virtualHint ? (
+                  <p className="status error">
+                    La entrada elegida parece un cable o un dispositivo virtual. Para este diagnóstico elige el micrófono
+                    físico.
+                  </p>
+                ) : null}
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={monitoring}
+                    disabled={busy || outgoingActive || !selectedInput}
+                    onChange={(event) => void toggleMonitor(event.target.checked)}
+                  />
+                  Medidor de nivel
+                </label>
+                <div
+                  className="meter"
+                  role="meter"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={monitoring ? level : 0}
+                  aria-label="Nivel del micrófono"
+                >
+                  <span style={{ width: monitoring ? `${level}%` : '0%' }} />
+                </div>
+                <p className="hint">{monitoring ? `Nivel relativo: ${level}` : 'Medidor apagado.'}</p>
+              </section>
+
+              <section>
+                <h3>Salida del tono</h3>
+                <label className="field">
+                  Salida
+                  <select value={outputId} disabled={busy || outgoingActive} onChange={(event) => setOutputId(event.target.value)}>
+                    <option value="">Elige una salida</option>
+                    {outputs.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {deviceCaption(device)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="hint">
+                  {outputs.length === 0
+                    ? 'No hay salidas enumeradas. Revisa el dispositivo de reproducción del sistema.'
+                    : `${outputs.length} salida(s), sin contar los alias default y communications.`}
+                </p>
+                <div className="row">
+                  <button type="button" onClick={() => void playSelected()} disabled={busy || outgoingActive || !probe.setSinkIdOnMediaElement}>
+                    Reproducir tono en la salida elegida
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void pickOutput()}
+                    disabled={busy || outgoingActive || !probe.selectAudioOutput}
+                  >
+                    Elegir con el selector del sistema
+                  </button>
+                  <button type="button" className="secondary" onClick={() => void playDefault()} disabled={busy || outgoingActive}>
+                    Reproducir tono en la salida predeterminada
+                  </button>
+                </div>
+              </section>
+
+              <p className={`status ${status.tone}`}>{status.text}</p>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {activeModal === 'system' ? (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Sistema y diagnóstico"
+          onClick={() => setActiveModal('none')}
+        >
+          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Sistema y diagnóstico (Ctrl+D)</h2>
+              <button
+                type="button"
+                className="secondary modal-close"
+                onClick={() => setActiveModal('none')}
+              >
+                Cerrar
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <section>
+                <h3>Conexion con Gemini</h3>
+                <p>
+                  Comprueba el backend y las credenciales.
+                  Esta prueba no abre el microfono ni envia audio.
+                </p>
+                <button
+                  type="button"
+                  disabled={anyActive || !window.audioDiagnostic}
+                  onClick={() => void checkGeminiConnection()}
+                >
+                  Comprobar conexion con Gemini
+                </button>
+                <p className="hint">
+                  Enumera dispositivos, pide el micrófono con un botón y reproduce un tono en la salida que esta versión
+                  pueda seleccionar. No traduce ni se une a una reunión.
+                </p>
+              </section>
+
+              <section>
+                <h3>Sistema</h3>
+                {host ? (
+                  <>
+                    <p>
+                      Electron {host.electron} · Chromium {host.chrome}
+                    </p>
+                    <p>{describePlatformLimit(host)}</p>
+                  </>
+                ) : (
+                  <p className="status error">{hostError ?? 'Leyendo la versión instalada…'}</p>
+                )}
+              </section>
+
+              <section>
+                <h3>Selección de salida en esta versión</h3>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>API</th>
+                      <th>Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <ApiRow name="enumerateDevices" available={probe.enumerateDevices} />
+                    <ApiRow name="HTMLMediaElement.setSinkId" available={probe.setSinkIdOnMediaElement} />
+                    <ApiRow name="AudioContext.setSinkId" available={probe.setSinkIdOnAudioContext} />
+                    <ApiRow name="mediaDevices.selectAudioOutput" available={probe.selectAudioOutput} />
+                  </tbody>
+                </table>
+                <p>{describeOutputSupport(probe, host)}</p>
+              </section>
+
+              <p className={`status ${status.tone}`}>{status.text}</p>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   )
 }
