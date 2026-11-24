@@ -75,6 +75,19 @@ button {
 
 button.secondary { background: #5c5346; }
 
+button.talk {
+  min-height: 76px;
+  width: min(100%, 440px);
+  padding: 18px 20px;
+  font-size: 1.15rem;
+  touch-action: none;
+  user-select: none;
+}
+
+button.talk[data-holding='true']:not(:disabled) {
+  background: #1b3d30;
+}
+
 button:disabled {
   background: #c8c0b4;
   color: #4e493f;

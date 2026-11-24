@@ -1,7 +1,9 @@
 export type TranslationState =
   | 'idle'
   | 'connecting'
+  | 'capturing'
   | 'translating'
+  | 'playing'
   | 'stopping'
   | 'error'
 
@@ -22,6 +24,7 @@ interface ServerMessage {
   goAway?: object
   serverContent?: {
     interrupted?: boolean
+    turnComplete?: boolean
     outputTranscription?: { text?: string }
     modelTurn?: {
       parts?: Array<{
@@ -33,6 +36,10 @@ interface ServerMessage {
     }
   }
 }
+
+const MIN_SAMPLES = 1600
+const MAX_SAMPLES = 16000 * 60
+const SEND_FRAME = 3200
 
 function encodePcm(samples: Float32Array): string {
   const bytes = new Uint8Array(samples.length * 2)
@@ -69,17 +76,35 @@ export class GeminiTranslationProvider {
 
   private outputStream: MediaStream | null = null
   private player: HTMLAudioElement | null = null
+  private destination: MediaStreamAudioDestinationNode | null = null
+  private outputId = ''
 
   private playback = new Set<AudioBufferSourceNode>()
   private nextPlaybackTime = 0
 
   private cancelSetup: (() => void) | null = null
   private testTimer: ReturnType<typeof setTimeout> | null = null
+  private turnTimer: ReturnType<typeof setTimeout> | null = null
+
+  private sessionTask: Promise<void> | null = null
+  private options: StartOptions | null = null
+
+  private capturePhase: 'off' | 'opening' | 'live' = 'off'
+  private captureEpoch = 0
+  private chunks: Float32Array[] = []
+  private sampleCount = 0
+  private turnEnded = false
 
   constructor(private readonly handlers: TranslationHandlers) {}
 
-  async start(options: StartOptions): Promise<void> {
-    if (this.state === 'connecting' || this.state === 'translating') {
+  startCapture(options: StartOptions): void {
+    if (
+      this.capturePhase !== 'off' ||
+      this.state === 'connecting' ||
+      this.state === 'translating' ||
+      this.state === 'playing' ||
+      this.state === 'stopping'
+    ) {
       return
     }
 
@@ -88,14 +113,50 @@ export class GeminiTranslationProvider {
       return
     }
 
+    this.options = options
+    this.capturePhase = 'opening'
+    const epoch = ++this.captureEpoch
+    this.chunks = []
+    this.sampleCount = 0
+    this.turnEnded = false
+    this.setState('capturing')
+
+    void this.ensureSession(options).catch(() => {})
+    void this.openCapture(options, epoch)
+  }
+
+  stopCaptureAndTranslate(): void {
+    if (this.capturePhase === 'off') return
+
+    this.capturePhase = 'off'
+    this.captureEpoch += 1
+
+    const chunks = this.chunks
+    this.chunks = []
+    this.sampleCount = 0
+
+    const generation = this.generation
+    this.setState('translating')
+    void this.finishCapture(chunks, generation)
+  }
+
+  stop(): void {
+    this.generation += 1
+    this.setState('stopping')
     this.release()
-    const generation = ++this.generation
-    this.setState('connecting')
+    this.setState('idle')
+  }
+
+  private async openCapture(
+    options: StartOptions,
+    epoch: number,
+  ): Promise<void> {
+    const generation = this.generation
 
     try {
       await window.audioDiagnostic.armMicrophoneRequest()
 
-      if (generation !== this.generation) return
+      if (!this.captureIsCurrent(epoch, generation)) return
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -107,7 +168,7 @@ export class GeminiTranslationProvider {
         video: false,
       })
 
-      if (generation !== this.generation) {
+      if (!this.captureIsCurrent(epoch, generation)) {
         stream.getTracks().forEach((track) => track.stop())
         return
       }
@@ -116,17 +177,14 @@ export class GeminiTranslationProvider {
 
       for (const track of stream.getTracks()) {
         track.addEventListener('ended', () => {
-          if (generation === this.generation) {
+          if (this.captureIsCurrent(epoch, generation)) {
             this.fail('El microfono se desconecto.')
           }
         })
       }
 
       const input = new AudioContext({ sampleRate: 16000 })
-      const output = new AudioContext({ sampleRate: 24000 })
-
       this.inputContext = input
-      this.outputContext = output
 
       if (input.sampleRate !== 16000) {
         throw new Error(
@@ -134,223 +192,36 @@ export class GeminiTranslationProvider {
         )
       }
 
-      await Promise.all([input.resume(), output.resume()])
+      await input.resume()
 
-      if (generation !== this.generation) return
-
-      await window.audioDiagnostic.armOutputRequest()
-
-      if (generation !== this.generation) return
-
-      const destination = output.createMediaStreamDestination()
-      const player = new Audio()
-
-      this.outputStream = destination.stream
-      this.player = player
-      player.srcObject = destination.stream
-
-      await player.setSinkId(options.outputId)
-
-      if (generation !== this.generation) return
-
-      await player.play()
-
-      if (generation !== this.generation) return
-
-      const credential =
-        await window.audioDiagnostic.createGeminiSession()
-
-      if (generation !== this.generation) return
-
-      const endpoint =
-        'wss://generativelanguage.googleapis.com/ws/' +
-        'google.ai.generativelanguage.v1beta.' +
-        'GenerativeService.BidiGenerateContentConstrained'
-
-      const socket = new WebSocket(
-        `${endpoint}?access_token=${encodeURIComponent(credential.token)}`,
-      )
-
-      this.socket = socket
-
-      let messageQueue = Promise.resolve()
-
-      await new Promise<void>((resolve, reject) => {
-        let ready = false
-
-        const timer = setTimeout(() => {
-          reject(new Error('Gemini no confirmo la sesion a tiempo.'))
-        }, 20000)
-
-        const finishSetup = (): void => {
-          clearTimeout(timer)
-          this.cancelSetup = null
-        }
-
-        this.cancelSetup = () => {
-          finishSetup()
-          reject(new Error('Inicio cancelado.'))
-        }
-
-        socket.onopen = () => {
-          if (generation !== this.generation) return
-
-          socket.send(JSON.stringify({
-            setup: {
-              model: `models/${credential.model}`,
-              inputAudioTranscription: {},
-              outputAudioTranscription: {},
-              generationConfig: {
-                responseModalities: ['AUDIO'],
-                translationConfig: {
-                  targetLanguageCode: 'en',
-                  echoTargetLanguage: false,
-                },
-              },
-            },
-          }))
-        }
-
-        socket.onmessage = (event: MessageEvent) => {
-          messageQueue = messageQueue.then(async () => {
-            if (generation !== this.generation) return
-
-            const text = typeof event.data === 'string'
-              ? event.data
-              : await (event.data as Blob).text()
-
-            if (generation !== this.generation) return
-
-            const message = JSON.parse(text) as ServerMessage
-
-            if (message.error) {
-              throw new Error(
-                `Gemini rechazo la sesion. Codigo: ${
-                  message.error.code ?? 'no disponible'
-                }.`,
-              )
-            }
-
-            if ('setupComplete' in message && !ready) {
-              ready = true
-              finishSetup()
-              resolve()
-            }
-
-            if (message.goAway) {
-              throw new Error(
-                'Gemini aviso que la sesion debe cerrarse. Deten y reinicia.',
-              )
-            }
-
-            const content = message.serverContent
-
-            if (content?.interrupted) {
-              this.clearPlayback()
-            }
-
-            const transcript = content?.outputTranscription?.text
-
-            if (typeof transcript === 'string') {
-              this.handlers.onText(transcript)
-            }
-
-            for (const part of content?.modelTurn?.parts ?? []) {
-              const inline = part.inlineData
-
-              if (
-                typeof inline?.data === 'string' &&
-                inline.mimeType?.startsWith('audio/pcm')
-              ) {
-                this.playPcm(inline.data, destination)
-              }
-            }
-          }).catch((error: unknown) => {
-            if (generation !== this.generation) return
-
-            const message = error instanceof Error
-              ? error.message
-              : 'No se pudo procesar la respuesta de Gemini.'
-
-            if (!ready) {
-              finishSetup()
-              reject(new Error(message))
-            } else {
-              this.fail(message)
-            }
-          })
-        }
-
-        socket.onerror = () => {
-          if (generation !== this.generation) return
-
-          const message =
-            'Fallo de conexion con Gemini. Revisa red, acceso y cuota.'
-
-          if (!ready) {
-            finishSetup()
-            reject(new Error(message))
-          } else {
-            this.fail(message)
-          }
-        }
-
-        socket.onclose = (event: CloseEvent) => {
-          if (generation !== this.generation) return
-
-          const message =
-            `Gemini cerro la conexion. Codigo: ${event.code}.`
-
-          if (!ready) {
-            finishSetup()
-            reject(new Error(message))
-          } else {
-            this.fail(message)
-          }
-        }
-      })
-
-      if (generation !== this.generation) return
+      if (!this.captureIsCurrent(epoch, generation)) {
+        this.detachInputGraph()
+        return
+      }
 
       const source = input.createMediaStreamSource(stream)
 
-      // Implementacion inicial para la beta.
-      // Migrar a AudioWorklet antes de una version de produccion.
+      // ScriptProcessor sigue siendo el grafo de esta beta.
+      // Se destruye por completo antes de enviar audio a Gemini.
       const processor = input.createScriptProcessor(2048, 1, 1)
       const silentGain = input.createGain()
 
       this.source = source
       this.processor = processor
       this.silentGain = silentGain
-
       silentGain.gain.value = 0
 
       processor.onaudioprocess = (event: AudioProcessingEvent) => {
-        if (
-          generation !== this.generation ||
-          socket.readyState !== WebSocket.OPEN
-        ) {
-          return
-        }
+        if (!this.captureIsCurrent(epoch, generation)) return
 
-        if (socket.bufferedAmount > 1024 * 1024) {
-          this.fail('La red no esta enviando el audio suficientemente rapido.')
-          return
-        }
+        const samples = event.inputBuffer.getChannelData(0)
+        const copy = new Float32Array(samples.length)
+        copy.set(samples)
+        this.chunks.push(copy)
+        this.sampleCount += copy.length
 
-        try {
-          const samples = event.inputBuffer.getChannelData(0)
-
-          socket.send(JSON.stringify({
-            realtimeInput: {
-              audio: {
-                data: encodePcm(samples),
-                mimeType: 'audio/pcm;rate=16000',
-              },
-            },
-          }))
-        } catch {
-          this.fail('No se pudo enviar el audio del microfono.')
+        if (this.sampleCount >= MAX_SAMPLES) {
+          this.stopCaptureAndTranslate()
         }
       }
 
@@ -358,30 +229,374 @@ export class GeminiTranslationProvider {
       processor.connect(silentGain)
       silentGain.connect(input.destination)
 
-      this.setState('translating')
+      if (!this.captureIsCurrent(epoch, generation)) {
+        this.detachInputGraph()
+        return
+      }
 
-      // Limite deliberado para las primeras pruebas.
-      this.testTimer = setTimeout(() => {
-        if (generation === this.generation) {
-          this.stop()
-        }
-      }, 120000)
+      this.capturePhase = 'live'
     } catch (error) {
-      if (generation !== this.generation) return
+      if (!this.captureIsCurrent(epoch, generation)) return
 
       this.fail(
         error instanceof Error
           ? error.message
-          : 'No se pudo iniciar la traduccion.',
+          : 'No se pudo abrir el microfono.',
       )
     }
   }
 
-  stop(): void {
-    this.generation += 1
-    this.setState('stopping')
-    this.release()
-    this.setState('idle')
+  private async finishCapture(
+    chunks: Float32Array[],
+    generation: number,
+  ): Promise<void> {
+    await this.teardownCapture()
+
+    if (generation !== this.generation || this.state !== 'translating') return
+
+    const total = chunks.reduce((count, chunk) => count + chunk.length, 0)
+
+    if (total < MIN_SAMPLES) {
+      this.setState('idle')
+      return
+    }
+
+    const options = this.options
+
+    if (!options) {
+      this.fail('No hay dispositivos seleccionados.')
+      return
+    }
+
+    try {
+      await this.ensureSession(options)
+    } catch (error) {
+      if (generation !== this.generation || this.state !== 'translating') return
+
+      this.fail(
+        error instanceof Error
+          ? error.message
+          : 'No se pudo preparar Gemini.',
+      )
+      return
+    }
+
+    if (generation !== this.generation || this.state !== 'translating') return
+
+    const socket = this.socket
+
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      this.fail('La sesion de Gemini no esta lista.')
+      return
+    }
+
+    if (!this.destination) {
+      this.fail('La salida de audio no esta lista.')
+      return
+    }
+
+    this.turnEnded = false
+
+    try {
+      let chunkIndex = 0
+      let chunkOffset = 0
+
+      while (chunkIndex < chunks.length) {
+        if (generation !== this.generation) return
+
+        const frame = new Float32Array(SEND_FRAME)
+        let written = 0
+
+        while (written < SEND_FRAME && chunkIndex < chunks.length) {
+          const chunk = chunks[chunkIndex]
+
+          if (chunkOffset >= chunk.length) {
+            chunkIndex += 1
+            chunkOffset = 0
+            continue
+          }
+
+          const take = Math.min(SEND_FRAME - written, chunk.length - chunkOffset)
+          frame.set(chunk.subarray(chunkOffset, chunkOffset + take), written)
+          written += take
+          chunkOffset += take
+
+          if (chunkOffset >= chunk.length) {
+            chunkIndex += 1
+            chunkOffset = 0
+          }
+        }
+
+        if (written === 0) break
+
+        socket.send(JSON.stringify({
+          realtimeInput: {
+            audio: {
+              data: encodePcm(frame.subarray(0, written)),
+              mimeType: 'audio/pcm;rate=16000',
+            },
+          },
+        }))
+      }
+
+      if (generation !== this.generation) return
+
+      socket.send(JSON.stringify({
+        realtimeInput: { audioStreamEnd: true },
+      }))
+
+      this.armTurnTimer(generation)
+    } catch {
+      if (generation === this.generation) {
+        this.fail('No se pudo enviar el audio a Gemini.')
+      }
+    }
+  }
+
+  private ensureSession(options: StartOptions): Promise<void> {
+    this.options = options
+
+    if (
+      this.socket?.readyState === WebSocket.OPEN &&
+      this.outputContext &&
+      this.player &&
+      this.destination
+    ) {
+      return this.applyOutput(options.outputId)
+    }
+
+    if (!this.sessionTask) {
+      const generation = this.generation
+
+      this.sessionTask = this.connect(options, generation).then(
+        () => {
+          if (this.generation !== generation) {
+            this.sessionTask = null
+          }
+        },
+        (error: unknown) => {
+          this.sessionTask = null
+
+          if (this.generation === generation) {
+            this.fail(
+              error instanceof Error
+                ? error.message
+                : 'No se pudo preparar Gemini.',
+            )
+          }
+
+          throw error
+        },
+      )
+    }
+
+    return this.sessionTask
+  }
+
+  private async applyOutput(outputId: string): Promise<void> {
+    const player = this.player
+
+    if (!player || this.outputId === outputId) return
+
+    await window.audioDiagnostic.armOutputRequest()
+    await player.setSinkId(outputId)
+    this.outputId = outputId
+  }
+
+  private async connect(
+    options: StartOptions,
+    generation: number,
+  ): Promise<void> {
+    await window.audioDiagnostic.armOutputRequest()
+
+    if (generation !== this.generation) return
+
+    const output = new AudioContext({ sampleRate: 24000 })
+    this.outputContext = output
+    await output.resume()
+
+    if (generation !== this.generation) return
+
+    const destination = output.createMediaStreamDestination()
+    const player = new Audio()
+
+    this.destination = destination
+    this.outputStream = destination.stream
+    this.player = player
+    player.srcObject = destination.stream
+
+    await player.setSinkId(options.outputId)
+    this.outputId = options.outputId
+
+    if (generation !== this.generation) return
+
+    await player.play()
+
+    if (generation !== this.generation) return
+
+    const credential = await window.audioDiagnostic.createGeminiSession()
+
+    if (generation !== this.generation) return
+
+    const endpoint =
+      'wss://generativelanguage.googleapis.com/ws/' +
+      'google.ai.generativelanguage.v1beta.' +
+      'GenerativeService.BidiGenerateContentConstrained'
+
+    const socket = new WebSocket(
+      `${endpoint}?access_token=${encodeURIComponent(credential.token)}`,
+    )
+
+    this.socket = socket
+
+    let messageQueue = Promise.resolve()
+
+    await new Promise<void>((resolve, reject) => {
+      let ready = false
+
+      const timer = setTimeout(() => {
+        reject(new Error('Gemini no confirmo la sesion a tiempo.'))
+      }, 20000)
+
+      const finishSetup = (): void => {
+        clearTimeout(timer)
+        this.cancelSetup = null
+      }
+
+      this.cancelSetup = () => {
+        finishSetup()
+        reject(new Error('Inicio cancelado.'))
+      }
+
+      socket.onopen = () => {
+        if (generation !== this.generation) return
+
+        socket.send(JSON.stringify({
+          setup: {
+            model: `models/${credential.model}`,
+            inputAudioTranscription: {},
+            outputAudioTranscription: {},
+            generationConfig: {
+              responseModalities: ['AUDIO'],
+              translationConfig: {
+                targetLanguageCode: 'en',
+                echoTargetLanguage: false,
+              },
+            },
+          },
+        }))
+      }
+
+      socket.onmessage = (event: MessageEvent) => {
+        messageQueue = messageQueue.then(async () => {
+          if (generation !== this.generation) return
+
+          const text = typeof event.data === 'string'
+            ? event.data
+            : await (event.data as Blob).text()
+
+          if (generation !== this.generation) return
+
+          const message = JSON.parse(text) as ServerMessage
+
+          if (message.error) {
+            throw new Error(
+              `Gemini rechazo la sesion. Codigo: ${
+                message.error.code ?? 'no disponible'
+              }.`,
+            )
+          }
+
+          if ('setupComplete' in message && !ready) {
+            ready = true
+            finishSetup()
+            resolve()
+          }
+
+          if (message.goAway) {
+            throw new Error(
+              'Gemini aviso que la sesion debe cerrarse. Deten y reinicia.',
+            )
+          }
+
+          const content = message.serverContent
+
+          if (content?.interrupted) {
+            this.clearPlayback()
+          }
+
+          const transcript = content?.outputTranscription?.text
+
+          if (typeof transcript === 'string') {
+            this.handlers.onText(transcript)
+          }
+
+          for (const part of content?.modelTurn?.parts ?? []) {
+            const inline = part.inlineData
+
+            if (
+              typeof inline?.data === 'string' &&
+              inline.mimeType?.startsWith('audio/pcm')
+            ) {
+              this.playPcm(inline.data)
+            }
+          }
+
+          if (content?.turnComplete) {
+            this.turnEnded = true
+            this.finishTurnIfIdle()
+          }
+        }).catch((error: unknown) => {
+          if (generation !== this.generation) return
+
+          const message = error instanceof Error
+            ? error.message
+            : 'No se pudo procesar la respuesta de Gemini.'
+
+          if (!ready) {
+            finishSetup()
+            reject(new Error(message))
+          } else {
+            this.fail(message)
+          }
+        })
+      }
+
+      socket.onerror = () => {
+        if (generation !== this.generation) return
+
+        const message =
+          'Fallo de conexion con Gemini. Revisa red, acceso y cuota.'
+
+        if (!ready) {
+          finishSetup()
+          reject(new Error(message))
+        } else {
+          this.fail(message)
+        }
+      }
+
+      socket.onclose = (event: CloseEvent) => {
+        if (generation !== this.generation) return
+
+        const message = `Gemini cerro la conexion. Codigo: ${event.code}.`
+
+        if (!ready) {
+          finishSetup()
+          reject(new Error(message))
+        } else {
+          this.fail(message)
+        }
+      }
+    })
+
+    if (generation !== this.generation) return
+
+    this.testTimer = setTimeout(() => {
+      if (generation === this.generation) {
+        this.stop()
+      }
+    }, 120000)
   }
 
   private fail(message: string): void {
@@ -396,13 +611,45 @@ export class GeminiTranslationProvider {
     this.handlers.onState(state)
   }
 
-  private playPcm(
-    base64: string,
-    destination: MediaStreamAudioDestinationNode,
-  ): void {
-    const context = this.outputContext
+  private captureIsCurrent(epoch: number, generation: number): boolean {
+    return epoch === this.captureEpoch && generation === this.generation
+  }
 
-    if (!context) return
+  private armTurnTimer(generation: number): void {
+    if (this.turnTimer) clearTimeout(this.turnTimer)
+
+    this.turnTimer = setTimeout(() => {
+      if (
+        generation === this.generation &&
+        (this.state === 'translating' || this.state === 'playing')
+      ) {
+        this.fail('Gemini no respondio a tiempo.')
+      }
+    }, 45000)
+  }
+
+  private finishTurnIfIdle(): void {
+    if (!this.turnEnded) return
+    if (this.playback.size > 0) return
+    if (this.state !== 'translating' && this.state !== 'playing') return
+
+    this.turnEnded = false
+
+    if (this.turnTimer) {
+      clearTimeout(this.turnTimer)
+      this.turnTimer = null
+    }
+
+    this.setState('idle')
+  }
+
+  private playPcm(base64: string): void {
+    if (this.state !== 'translating' && this.state !== 'playing') return
+
+    const context = this.outputContext
+    const destination = this.destination
+
+    if (!context || !destination) return
 
     const binary = atob(base64)
 
@@ -435,6 +682,7 @@ export class GeminiTranslationProvider {
     source.onended = () => {
       this.playback.delete(source)
       source.disconnect()
+      this.finishTurnIfIdle()
     }
 
     const start = Math.max(
@@ -444,6 +692,10 @@ export class GeminiTranslationProvider {
 
     source.start(start)
     this.nextPlaybackTime = start + buffer.duration
+
+    if (this.state === 'translating') {
+      this.setState('playing')
+    }
   }
 
   private clearPlayback(): void {
@@ -461,16 +713,7 @@ export class GeminiTranslationProvider {
     this.nextPlaybackTime = 0
   }
 
-  private release(): void {
-    if (this.testTimer) {
-      clearTimeout(this.testTimer)
-      this.testTimer = null
-    }
-
-    const cancelSetup = this.cancelSetup
-    this.cancelSetup = null
-    cancelSetup?.()
-
+  private detachInputGraph(): void {
     if (this.processor) {
       this.processor.onaudioprocess = null
       this.processor.disconnect()
@@ -485,6 +728,44 @@ export class GeminiTranslationProvider {
 
     this.stream?.getTracks().forEach((track) => track.stop())
     this.stream = null
+  }
+
+  private async teardownCapture(): Promise<void> {
+    this.detachInputGraph()
+
+    const input = this.inputContext
+    this.inputContext = null
+
+    if (input && input.state !== 'closed') {
+      await input.close().catch(() => {})
+    }
+  }
+
+  private release(): void {
+    this.capturePhase = 'off'
+    this.captureEpoch += 1
+    this.chunks = []
+    this.sampleCount = 0
+    this.turnEnded = false
+    this.sessionTask = null
+    this.options = null
+    this.outputId = ''
+
+    if (this.testTimer) {
+      clearTimeout(this.testTimer)
+      this.testTimer = null
+    }
+
+    if (this.turnTimer) {
+      clearTimeout(this.turnTimer)
+      this.turnTimer = null
+    }
+
+    const cancelSetup = this.cancelSetup
+    this.cancelSetup = null
+    cancelSetup?.()
+
+    this.detachInputGraph()
 
     if (this.socket) {
       this.socket.onopen = null
@@ -506,6 +787,8 @@ export class GeminiTranslationProvider {
       this.player.srcObject = null
       this.player = null
     }
+
+    this.destination = null
 
     this.outputStream?.getTracks().forEach((track) => track.stop())
     this.outputStream = null

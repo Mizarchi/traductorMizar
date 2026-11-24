@@ -14,9 +14,11 @@ interface TranslationPanelProps {
 }
 
 const stateLabels: Record<TranslationState, string> = {
-  idle: 'Detenida',
+  idle: 'Listo',
   connecting: 'Conectando',
+  capturing: 'Escuchando',
   translating: 'Traduciendo',
+  playing: 'Reproduciendo',
   stopping: 'Deteniendo',
   error: 'Error',
 }
@@ -36,6 +38,8 @@ export function TranslationPanel({
   const [state, setState] = useState<TranslationState>('idle')
   const [text, setText] = useState('')
   const [error, setError] = useState('')
+  const [holding, setHolding] = useState(false)
+  const holdingRef = useRef(false)
 
   activeCallbackRef.current = onActiveChange
 
@@ -50,7 +54,9 @@ export function TranslationPanel({
 
         activeCallbackRef.current(
           next === 'connecting' ||
+          next === 'capturing' ||
           next === 'translating' ||
+          next === 'playing' ||
           next === 'stopping',
         )
       },
@@ -82,29 +88,52 @@ export function TranslationPanel({
     providerRef.current?.stop()
   }, [stopSignal])
 
-  const active =
+  const locked =
     state === 'connecting' ||
     state === 'translating' ||
+    state === 'playing' ||
     state === 'stopping'
 
-  async function start(): Promise<void> {
-    const provider = providerRef.current
+  const talkDisabled =
+    locked ||
+    (diagnosticBusy && state !== 'capturing') ||
+    !inputId ||
+    !outputId
 
-    if (!provider || active || diagnosticBusy) return
+  const talkLabel =
+    state === 'playing'
+      ? 'Reproduciendo traducción'
+      : state === 'translating' || state === 'connecting'
+        ? 'Traduciendo…'
+        : 'Mantén pulsado para hablar'
+
+  function beginTalk(): void {
+    if (holdingRef.current || talkDisabled) return
 
     if (!inputId || !outputId) {
       setError('Selecciona un microfono y una salida en las listas.')
       return
     }
 
+    holdingRef.current = true
+    setHolding(true)
     setError('')
     setText('')
     onPrepare()
+    providerRef.current?.startCapture({ inputId, outputId })
+  }
 
-    await provider.start({ inputId, outputId })
+  function endTalk(): void {
+    if (!holdingRef.current) return
+
+    holdingRef.current = false
+    setHolding(false)
+    providerRef.current?.stopCaptureAndTranslate()
   }
 
   function stop(): void {
+    holdingRef.current = false
+    setHolding(false)
     providerRef.current?.stop()
   }
 
@@ -114,34 +143,54 @@ export function TranslationPanel({
 
       <p>
         Selecciona el microfono y los auriculares en las listas de abajo.
-        Al iniciar, tu audio se enviara a Google para traducirlo.
+        El microfono solo se abre mientras mantienes pulsado el boton.
+        Al soltar, se apaga y ese audio se envia a Google.
       </p>
 
       <p>
         Usa auriculares y frases de prueba sin informacion sensible.
-        Esta beta se detiene automaticamente a los dos minutos.
+        Mientras se traduce y se reproduce, el microfono sigue apagado.
+        La sesion de esta beta se cierra sola a los dos minutos.
       </p>
 
       <div className="row">
         <button
           type="button"
-          disabled={
-            active ||
-            diagnosticBusy ||
-            !inputId ||
-            !outputId
-          }
-          onClick={() => void start()}
+          className="talk"
+          data-holding={holding ? 'true' : 'false'}
+          disabled={talkDisabled}
+          onPointerDown={(event) => {
+            if (event.button !== 0) return
+            event.preventDefault()
+            event.currentTarget.setPointerCapture(event.pointerId)
+            beginTalk()
+          }}
+          onPointerUp={endTalk}
+          onPointerCancel={endTalk}
+          onContextMenu={(event) => event.preventDefault()}
+          onKeyDown={(event) => {
+            if (event.repeat) return
+            if (event.key !== ' ' && event.key !== 'Enter') return
+            event.preventDefault()
+            beginTalk()
+          }}
+          onKeyUp={(event) => {
+            if (event.key !== ' ' && event.key !== 'Enter') return
+            event.preventDefault()
+            endTalk()
+          }}
+          onBlur={endTalk}
         >
-          Iniciar traduccion
+          {talkLabel}
         </button>
 
         <button
           type="button"
-          disabled={!active}
+          className="secondary"
+          disabled={state === 'idle' || state === 'error'}
           onClick={stop}
         >
-          Detener traduccion
+          Detener
         </button>
       </div>
 
