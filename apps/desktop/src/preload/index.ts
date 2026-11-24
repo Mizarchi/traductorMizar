@@ -1,11 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import {
+  ARM_DISPLAY_AUDIO_CHANNEL,
   ARM_MICROPHONE_CHANNEL,
   ARM_OUTPUT_CHANNEL,
   HOST_INFO_CHANNEL,
+  LIST_DISPLAY_SOURCES_CHANNEL,
   type AudioDiagnosticApi,
+  type DisplayCaptureSource,
   type GeminiSessionCredential,
   type HostInfo,
+  type TargetLanguage,
 } from '../shared/ipc'
 
 function isHostInfo(value: unknown): value is HostInfo {
@@ -19,17 +23,29 @@ function isHostInfo(value: unknown): value is HostInfo {
   )
 }
 
-async function invokeArmed(channel: string): Promise<void> {
-  const result: unknown = await ipcRenderer.invoke(channel)
+function isDisplayCaptureSource(value: unknown): value is DisplayCaptureSource {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.id === 'string' &&
+    typeof record.name === 'string' &&
+    (record.kind === 'screen' || record.kind === 'window')
+  )
+}
+
+async function invokeArmed(channel: string, ...args: unknown[]): Promise<void> {
+  const result: unknown = await ipcRenderer.invoke(channel, ...args)
   if (result !== true) {
     throw new Error('El proceso principal no confirmó la solicitud')
   }
 }
 
 const api: AudioDiagnosticApi = {
-  createGeminiSession: async () => {
+  createGeminiSession: async (targetLanguage: TargetLanguage = 'en') => {
+    const safeTarget: TargetLanguage = targetLanguage === 'es' ? 'es' : 'en'
     const result: unknown = await ipcRenderer.invoke(
       'gemini:create-session',
+      safeTarget,
     )
 
     if (!result || typeof result !== 'object') {
@@ -42,7 +58,7 @@ const api: AudioDiagnosticApi = {
       typeof value.token !== 'string' ||
       !value.token.startsWith('auth_tokens/') ||
       value.model !== 'gemini-3.5-live-translate-preview' ||
-      value.targetLanguage !== 'en'
+      value.targetLanguage !== safeTarget
     ) {
       throw new Error('Formato de credencial temporal no valido')
     }
@@ -50,10 +66,10 @@ const api: AudioDiagnosticApi = {
     return {
       token: value.token,
       model: value.model,
-      targetLanguage: value.targetLanguage,
+      targetLanguage: safeTarget,
     } satisfies GeminiSessionCredential
   },
-  
+
   checkGeminiConnection: () => invokeArmed('gemini:check'),
   getHostInfo: async () => {
     const result: unknown = await ipcRenderer.invoke(HOST_INFO_CHANNEL)
@@ -64,6 +80,19 @@ const api: AudioDiagnosticApi = {
   },
   armMicrophoneRequest: () => invokeArmed(ARM_MICROPHONE_CHANNEL),
   armOutputRequest: () => invokeArmed(ARM_OUTPUT_CHANNEL),
+  listDisplaySources: async () => {
+    const result: unknown = await ipcRenderer.invoke(LIST_DISPLAY_SOURCES_CHANNEL)
+    if (!Array.isArray(result) || !result.every(isDisplayCaptureSource)) {
+      throw new Error('El proceso principal devolvió fuentes de captura no válidas')
+    }
+    return result
+  },
+  armDisplayAudioRequest: (sourceId: string) => {
+    if (typeof sourceId !== 'string' || sourceId.trim().length === 0) {
+      return Promise.reject(new Error('Selecciona una fuente de captura antes de iniciar.'))
+    }
+    return invokeArmed(ARM_DISPLAY_AUDIO_CHANNEL, sourceId)
+  },
 }
 
 contextBridge.exposeInMainWorld('audioDiagnostic', api)

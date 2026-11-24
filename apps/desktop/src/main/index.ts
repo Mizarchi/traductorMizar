@@ -1,10 +1,19 @@
 import { createGeminiSession } from './gemini-session'
 import { checkGeminiBackend } from './gemini-check'
-import { app, BrowserWindow, ipcMain, session, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, desktopCapturer, ipcMain, session, type IpcMainInvokeEvent } from 'electron'
 import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import path from 'node:path'
-import { ARM_MICROPHONE_CHANNEL, ARM_OUTPUT_CHANNEL, HOST_INFO_CHANNEL, type HostInfo } from '../shared/ipc'
+import {
+  ARM_DISPLAY_AUDIO_CHANNEL,
+  ARM_MICROPHONE_CHANNEL,
+  ARM_OUTPUT_CHANNEL,
+  HOST_INFO_CHANNEL,
+  LIST_DISPLAY_SOURCES_CHANNEL,
+  type DisplayCaptureSource,
+  type HostInfo,
+  type TargetLanguage,
+} from '../shared/ipc'
 
 const probeMode = process.argv.includes('--probe')
 
@@ -46,15 +55,24 @@ function readHostInfo(): HostInfo {
 
 let microphoneArmed = false
 let outputArmed = false
+let pendingDisplaySourceId: string | null = null
+
+function parseTargetLanguage(args: unknown[]): TargetLanguage {
+  if (args.length === 0) return 'en'
+  if (args.length === 1 && (args[0] === 'en' || args[0] === 'es')) {
+    return args[0]
+  }
+  throw new Error('Idioma de destino no permitido')
+}
 
 function registerIpc(): void {
   ipcMain.handle(
     'gemini:create-session',
     async (event, ...args: unknown[]) => {
-      rejectArguments(args)
       assertTrustedSender(event)
+      const targetLanguage = parseTargetLanguage(args)
 
-      return createGeminiSession(app.getAppPath())
+      return createGeminiSession(app.getAppPath(), targetLanguage)
     },
   )
   ipcMain.handle('gemini:check', async (event, ...args: unknown[]) => {
@@ -79,6 +97,30 @@ function registerIpc(): void {
     rejectArguments(args)
     assertTrustedSender(event)
     outputArmed = true
+    return true
+  })
+  ipcMain.handle(LIST_DISPLAY_SOURCES_CHANNEL, async (event, ...args: unknown[]) => {
+    rejectArguments(args)
+    assertTrustedSender(event)
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 0, height: 0 },
+    })
+    return sources.map((source): DisplayCaptureSource => ({
+      id: source.id,
+      name: source.name,
+      kind: source.id.startsWith('screen:') ? 'screen' : 'window',
+    }))
+  })
+  ipcMain.handle(ARM_DISPLAY_AUDIO_CHANNEL, (event, ...args: unknown[]) => {
+    assertTrustedSender(event)
+    if (process.platform !== 'win32') {
+      throw new Error('El loopback de sistema solo esta disponible en Windows.')
+    }
+    if (args.length !== 1 || typeof args[0] !== 'string' || args[0].trim().length === 0) {
+      throw new Error('Debes indicar explicitamente una fuente de captura.')
+    }
+    pendingDisplaySourceId = args[0]
     return true
   })
 }
@@ -120,6 +162,31 @@ function registerPermissions(): void {
       return microphoneArmed && audio
     }
     return false
+  })
+  current.setDisplayMediaRequestHandler(async (request, callback) => {
+    const url = request.frame?.url ?? ''
+    const requestedId = pendingDisplaySourceId
+    pendingDisplaySourceId = null
+
+    if (!isTrustedUrl(url) || !requestedId || process.platform !== 'win32') {
+      callback(null)
+      return
+    }
+
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'],
+        thumbnailSize: { width: 0, height: 0 },
+      })
+      const matched = sources.find((source) => source.id === requestedId)
+      if (!matched) {
+        callback(null)
+        return
+      }
+      callback({ video: matched, audio: 'loopback' })
+    } catch {
+      callback(null)
+    }
   })
 }
 

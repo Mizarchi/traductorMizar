@@ -3,29 +3,26 @@ import { existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-export interface GeminiSessionCredential {
-  token: string
-  model: string
-  targetLanguage: string
-}
+import type { GeminiSessionCredential, TargetLanguage } from '../shared/ipc'
 
-let pending: Promise<GeminiSessionCredential> | null = null
+const pending = new Map<TargetLanguage, Promise<GeminiSessionCredential>>()
 
 export function createGeminiSession(
   projectRoot: string,
+  targetLanguage: TargetLanguage = 'en',
 ): Promise<GeminiSessionCredential> {
-  if (pending) {
+  if (pending.has(targetLanguage)) {
     return Promise.reject(
-      new Error('Ya se esta preparando una sesion de Gemini.'),
+      new Error('Ya se esta preparando una sesion de Gemini para esta direccion.'),
     )
   }
 
-  const task = requestCredential(projectRoot)
-  pending = task
+  const task = requestCredential(projectRoot, targetLanguage)
+  pending.set(targetLanguage, task)
 
   void task.then(
-    () => { if (pending === task) pending = null },
-    () => { if (pending === task) pending = null },
+    () => { if (pending.get(targetLanguage) === task) pending.delete(targetLanguage) },
+    () => { if (pending.get(targetLanguage) === task) pending.delete(targetLanguage) },
   )
 
   return task
@@ -33,6 +30,7 @@ export function createGeminiSession(
 
 async function requestCredential(
   projectRoot: string,
+  targetLanguage: TargetLanguage,
 ): Promise<GeminiSessionCredential> {
   if (process.platform !== 'win32') {
     throw new Error('Inicia la copia de Windows para traducir.')
@@ -57,7 +55,7 @@ async function requestCredential(
   }
 
   return new Promise((resolve, reject) => {
-    const child = fork(script, ['--issue'], {
+    const child = fork(script, ['--issue', `--target=${targetLanguage}`], {
       execPath: executable,
       execArgv: [`--env-file=${credentials}`],
       cwd: projectRoot,
@@ -110,12 +108,12 @@ async function requestCredential(
         typeof value['token'] === 'string' &&
         value['token'].startsWith('auth_tokens/') &&
         value['model'] === 'gemini-3.5-live-translate-preview' &&
-        value['targetLanguage'] === 'en'
+        value['targetLanguage'] === targetLanguage
       ) {
         finish(null, {
           token: value['token'],
           model: value['model'],
-          targetLanguage: value['targetLanguage'],
+          targetLanguage,
         })
       }
     })

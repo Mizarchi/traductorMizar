@@ -139,3 +139,13 @@ th, td {
   align-items: center;
   margin: 12px 0;
 }
+
+.subtitles {
+  min-height: 72px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f7f3ea;
+  border: 1px solid #e2d9c8;
+  font-size: 1.05rem;
+  white-space: pre-wrap;
+}

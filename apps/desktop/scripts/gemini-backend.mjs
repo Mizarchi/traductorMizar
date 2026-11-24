@@ -21,7 +21,12 @@ function respond(res, status, data) {
   res.end(JSON.stringify(data))
 }
 
-async function createTemporaryToken() {
+const targetArg = process.argv.find((arg) => arg.startsWith('--target='))
+const requestedTarget = targetArg ? targetArg.slice('--target='.length) : 'en'
+const defaultTargetLanguage = requestedTarget === 'es' ? 'es' : 'en'
+
+async function createTemporaryToken(targetLanguage = defaultTargetLanguage) {
+  const safeTarget = targetLanguage === 'es' ? 'es' : 'en'
   const response = await fetch(
     'https://generativelanguage.googleapis.com/v1beta/auth_tokens',
     {
@@ -41,7 +46,7 @@ async function createTemporaryToken() {
           generationConfig: {
             responseModalities: ['AUDIO'],
             translationConfig: {
-              targetLanguageCode: 'en',
+              targetLanguageCode: safeTarget,
               echoTargetLanguage: false,
             },
           },
@@ -67,7 +72,7 @@ async function createTemporaryToken() {
     token: data.name,
     expireTime: data.expireTime ?? null,
     model: 'gemini-3.5-live-translate-preview',
-    targetLanguage: 'en',
+    targetLanguage: safeTarget,
   }
 }
 

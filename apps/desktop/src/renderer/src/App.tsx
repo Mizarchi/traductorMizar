@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type JSX } from 'react'
 import { deviceCaption, listEndpoints, preferredPhysicalInput, type ListedDevice } from './audio/devices'
+import { MeetingTranslationPanel } from './translation/MeetingTranslationPanel'
 import { TranslationPanel } from './translation/TranslationPanel'
 import {
   describeMediaError,
@@ -45,7 +46,10 @@ export function App(): JSX.Element {
     setLevel(0)
   }
   const [busy, setBusy] = useState(false)
+  const [outgoingActive, setOutgoingActive] = useState(false)
+  const [incomingActive, setIncomingActive] = useState(false)
   const [translationStopSignal, setTranslationStopSignal] = useState(0)
+  const anyActive = busy || outgoingActive || incomingActive
   const inputIdRef = useRef('')
   const outputIdRef = useRef('')
   const inputsRef = useRef<ListedDevice[]>([])
@@ -385,7 +389,16 @@ export function App(): JSX.Element {
         diagnosticBusy={busy}
         stopSignal={translationStopSignal}
         onPrepare={prepareTranslation}
-        onActiveChange={setBusy}
+        onActiveChange={setOutgoingActive}
+      />
+
+      <MeetingTranslationPanel
+        inputs={inputs}
+        outgoingInputId={inputId}
+        outgoingOutput={selectedOutput}
+        host={host}
+        stopSignal={translationStopSignal}
+        onActiveChange={setIncomingActive}
       />
 
       <section>
@@ -396,7 +409,7 @@ export function App(): JSX.Element {
         </p>
         <button
           type="button"
-          disabled={busy || !window.audioDiagnostic}
+          disabled={anyActive || !window.audioDiagnostic}
           onClick={() => void checkGeminiConnection()}
         >
           Comprobar conexion con Gemini
@@ -447,7 +460,7 @@ export function App(): JSX.Element {
           el error real.
         </p>
         <div className="row">
-          <button type="button" onClick={() => void requestMicrophone()} disabled={busy || !window.audioDiagnostic}>
+          <button type="button" onClick={() => void requestMicrophone()} disabled={anyActive || !window.audioDiagnostic}>
             Solicitar permiso del micrófono
           </button>
           <button type="button" className="secondary" onClick={() => void refreshDevices(false)} disabled={busy}>
@@ -462,7 +475,7 @@ export function App(): JSX.Element {
           Entrada
           <select
             value={inputId}
-            disabled={busy}
+            disabled={busy || outgoingActive}
             onChange={(event) => {
               const next = event.target.value
               monitorOperationRef.current += 1
@@ -496,7 +509,7 @@ export function App(): JSX.Element {
           <input
             type="checkbox"
             checked={monitoring}
-            disabled={busy || !selectedInput}
+            disabled={busy || outgoingActive || !selectedInput}
             onChange={(event) => void toggleMonitor(event.target.checked)}
           />
           Medidor de nivel
@@ -518,7 +531,7 @@ export function App(): JSX.Element {
         <h2>Salida del tono</h2>
         <label className="field">
           Salida
-          <select value={outputId} disabled={busy} onChange={(event) => setOutputId(event.target.value)}>
+          <select value={outputId} disabled={busy || outgoingActive} onChange={(event) => setOutputId(event.target.value)}>
             <option value="">Elige una salida</option>
             {outputs.map((device) => (
               <option key={device.deviceId} value={device.deviceId}>
@@ -533,18 +546,18 @@ export function App(): JSX.Element {
             : `${outputs.length} salida(s), sin contar los alias default y communications.`}
         </p>
         <div className="row">
-          <button type="button" onClick={() => void playSelected()} disabled={busy || !probe.setSinkIdOnMediaElement}>
+          <button type="button" onClick={() => void playSelected()} disabled={busy || outgoingActive || !probe.setSinkIdOnMediaElement}>
             Reproducir tono en la salida elegida
           </button>
           <button
             type="button"
             className="secondary"
             onClick={() => void pickOutput()}
-            disabled={busy || !probe.selectAudioOutput}
+            disabled={busy || outgoingActive || !probe.selectAudioOutput}
           >
             Elegir con el selector del sistema
           </button>
-          <button type="button" className="secondary" onClick={() => void playDefault()} disabled={busy}>
+          <button type="button" className="secondary" onClick={() => void playDefault()} disabled={busy || outgoingActive}>
             Reproducir tono en la salida predeterminada
           </button>
         </div>
